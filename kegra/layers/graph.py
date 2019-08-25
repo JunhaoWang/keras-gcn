@@ -73,7 +73,7 @@ class GraphConvolution(Layer):
         supports = K.concatenate(supports, axis=1)
         output = K.dot(supports, self.kernel)
 
-        if self.bias:
+        if self.bias is not None:
             output += self.bias
         return self.activation(output)
 
