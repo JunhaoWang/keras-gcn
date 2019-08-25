@@ -21,8 +21,9 @@ DATASET = 'cora'
 FILTER = 'localpool'  # 'chebyshev'
 MAX_DEGREE = 2  # maximum polynomial degree
 SYM_NORM = True  # symmetric (True) vs. left-only (False) normalization
-NB_EPOCH = 200
+NB_EPOCH = 2000
 PATIENCE = 10  # early stopping patience
+
 
 # Get data
 X, A, y = load_data(dataset=DATASET)
@@ -57,9 +58,6 @@ elif FILTER == 'chebyshev':
 else:
     raise Exception('Invalid filter type.')
 
-
-
-
 def convert_sparse_matrix_to_sparse_tensor(X):
     coo = X.tocoo()
     indices = np.mat([coo.row, coo.col]).transpose()
@@ -76,12 +74,19 @@ def _softplus_inverse(x):
   """Helper which computes the function inverse of `tf.nn.softplus`."""
   return tf.math.log(tf.math.expm1(x))
 
-def visualzie_embeddding(embeddings, labels):
+def visualzie_embeddding(embeddings, labels, name):
+    if tf.is_tensor(embeddings):
+        embeddings = embeddings.numpy()
+    else:
+        embeddings = embeddings.sample().numpy()
     X_embedded = PCA().fit_transform(embeddings)
     for l in set(labels):
         plt.scatter(X_embedded[np.argwhere(labels == l), 0], X_embedded[np.argwhere(labels == l), 1], label=l)
     plt.legend()
-    plt.show()
+    # plt.show()
+    plt.savefig(name)
+    plt.clf()
+    plt.close()
 
 
 class GAE(tf.keras.Model):
@@ -209,7 +214,7 @@ optimizer = tf.train.AdamOptimizer()
 
 loss_history = []
 
-for epoch in tqdm(range(200)):
+for epoch in tqdm(range(NB_EPOCH)):
     with tf.GradientTape() as tape:
         logits = gae.recon_edge(graph)
         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
@@ -226,11 +231,13 @@ for epoch in tqdm(range(200)):
 plt.plot(loss_history)
 plt.xlabel('Batch #')
 plt.ylabel('Loss [entropy]')
-plt.show()
+# plt.show()
+plt.savefig('gae_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
 
-embeddings = gae(graph).numpy()
-
-visualzie_embeddding(embeddings, labels)
+visualzie_embeddding(embeddings, labels, 'gae_cluster.png')
 
 ############################################# VGAE ###############################################################
 
@@ -240,7 +247,7 @@ optimizer = tf.train.AdamOptimizer()
 
 loss_history = []
 
-for epoch in tqdm(range(200)):
+for epoch in tqdm(range(NB_EPOCH)):
     with tf.GradientTape() as tape:
         logits = gae.recon_edge(graph)
         loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
@@ -259,11 +266,12 @@ for epoch in tqdm(range(200)):
 plt.plot(loss_history)
 plt.xlabel('Batch #')
 plt.ylabel('Loss [entropy]')
-plt.show()
+plt.savefig('vgae_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
 
-embeddings = gae(graph).numpy()
-
-visualzie_embeddding(embeddings, labels)
+visualzie_embeddding(embeddings, labels, 'vgae_cluster.png')
 
 ############################################ VGAE_tfp1 ###############################################################
 
@@ -273,7 +281,7 @@ optimizer = tf.train.AdamOptimizer()
 
 loss_history = []
 
-for epoch in tqdm(range(200)):
+for epoch in tqdm(range(NB_EPOCH)):
     with tf.GradientTape() as tape:
         logits = gae.recon_edge(graph)
         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
@@ -290,14 +298,15 @@ for epoch in tqdm(range(200)):
 plt.plot(loss_history)
 plt.xlabel('Batch #')
 plt.ylabel('Loss [entropy]')
-plt.show()
+plt.savefig('vgae_tfp1_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
 
-embeddings = gae(graph).mode().numpy()
-
-visualzie_embeddding(embeddings, labels)
+visualzie_embeddding(embeddings, labels, 'vgae_tfp1_cluster.png')
 
 
-############################################# VGAE_tfp2 ###############################################################
+############################################ VGAE_tfp2 ###############################################################
 
 gae = VGAE_tfp2()
 
@@ -305,14 +314,17 @@ optimizer = tf.train.AdamOptimizer()
 
 loss_history = []
 
-for epoch in tqdm(range(200)):
+for epoch in tqdm(range(NB_EPOCH)):
     with tf.GradientTape() as tape:
         logits = gae.recon_edge(graph)
-        loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+        loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
             pos_weight=pos_weight
         ))
+        loss_kl = -(0.5 / num_nodes) * tf.reduce_mean(tf.reduce_sum(1 + 2 * gae.z_log_std - tf.square(gae.z_mean) -
+                                                                    tf.square(tf.exp(gae.z_log_std)), 1))
+        loss_value = loss_recon + loss_kl
 
     loss_history.append(loss_value.numpy())
     grads = tape.gradient(loss_value, gae.trainable_variables)
@@ -322,8 +334,9 @@ for epoch in tqdm(range(200)):
 plt.plot(loss_history)
 plt.xlabel('Batch #')
 plt.ylabel('Loss [entropy]')
-plt.show()
+plt.savefig('vgae_tfp2_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
 
-embeddings = gae(graph).mode().numpy()
-
-visualzie_embeddding(embeddings, labels)
+visualzie_embeddding(embeddings, labels, 'vgae_tfp2_cluster.png')
