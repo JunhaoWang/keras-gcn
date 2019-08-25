@@ -4,7 +4,9 @@ tf.enable_eager_execution()
 
 import tensorflow_probability as tfp
 tfd = tfp.distributions
+tfpl = tfp.layers
 
+import tensorflow.keras.layers as tkl
 from keras.regularizers import l2
 from layers.graph import GraphConvolution
 from utils import *
@@ -64,6 +66,8 @@ def convert_sparse_matrix_to_sparse_tensor(X):
     return tf.SparseTensor(indices, coo.data, coo.shape)
 
 def recon_edge_helper(latent, method='dot'):
+    if not tf.is_tensor(latent):
+        latent = latent.sample()
     if method == 'dot':
         result = tf.reshape(tf.matmul(latent, tf.transpose(latent)), [-1])
     return result
@@ -127,10 +131,75 @@ class VGAE(tf.keras.Model):
         z_sample = self.z_mean + tf.random_normal(self.z_mean.shape.as_list()) * tf.exp(self.z_log_std)
         return z_sample
 
-    def recon_edge(self, inputs, method = 'dot'):
+    def recon_edge(self, inputs):
         """Run the model."""
         latent_sample = self.call(inputs)
         return recon_edge_helper(latent_sample)
+
+
+class VGAE_tfp1(tf.keras.Model):
+    def __init__(self):
+        super(VGAE_tfp1, self).__init__()
+        self.conv1 = GraphConvolution(
+            16, 1 , activation='relu', kernel_regularizer=l2(5e-4), name='conv1'
+        )
+        self.conv2 = GraphConvolution(
+            16, 1, name='conv2'
+        )
+        self.dense1 = tkl.Dense(tfpl.MultivariateNormalTriL.params_size(7))
+        self.prior = tfd.Independent(tfd.Normal(loc=tf.zeros(7), scale=1),
+                        reinterpreted_batch_ndims=1)
+        self.dist1 = tfpl.MultivariateNormalTriL(7,
+            activity_regularizer=tfpl.KLDivergenceRegularizer(self.prior))
+
+
+    def call(self, inputs):
+        X = tf.cast(tf.convert_to_tensor(inputs[0]), tf.float32)
+        G = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[1]), tf.float32)
+        inputs_tensor = [X, G]
+        latent = self.conv1(inputs_tensor)
+        latent = self.conv2([latent, G])
+        dist_params = self.dense1(latent)
+        dist = self.dist1(dist_params)
+        return dist
+
+    def recon_edge(self, inputs):
+        """Run the model."""
+        latent_sample = self.call(inputs)
+        return recon_edge_helper(latent_sample)
+
+class VGAE_tfp2(tf.keras.Model):
+    def __init__(self):
+        super(VGAE_tfp2, self).__init__()
+        self.conv1 = GraphConvolution(
+            16, 1, activation='relu', kernel_regularizer=l2(5e-4), name='conv1'
+        )
+        self.conv2 = GraphConvolution(
+            7, 1, name='conv2'
+        )
+        self.conv3 = GraphConvolution(
+            7, 1, name='conv2'
+        )
+        self.prior = tfd.Independent(tfd.Normal(loc=tf.zeros(7), scale=1),
+                                     reinterpreted_batch_ndims=1)
+
+
+    def call(self, inputs):
+        X = tf.cast(tf.convert_to_tensor(inputs[0]), tf.float32)
+        G = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[1]), tf.float32)
+        inputs_tensor = [X, G]
+        latent = self.conv1(inputs_tensor)
+        self.z_mean = self.conv2([latent, G])
+        self.z_log_std = self.conv3([latent, G])
+        z_sample = tfd.MultivariateNormalDiag(loc=self.z_mean, scale_diag=self.z_log_std)
+        # Todo: how to add kl in tfp
+        return z_sample
+
+    def recon_edge(self, inputs):
+        """Run the model."""
+        latent_sample = self.call(inputs)
+        return recon_edge_helper(latent_sample)
+
 
 ############################################# GAE ###############################################################
 
@@ -196,3 +265,65 @@ embeddings = gae(graph).numpy()
 
 visualzie_embeddding(embeddings, labels)
 
+############################################ VGAE_tfp1 ###############################################################
+
+gae = VGAE_tfp1()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(200)):
+    with tf.GradientTape() as tape:
+        logits = gae.recon_edge(graph)
+        loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+            pos_weight=pos_weight
+        ))
+
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+plt.show()
+
+embeddings = gae(graph).mode().numpy()
+
+visualzie_embeddding(embeddings, labels)
+
+
+############################################# VGAE_tfp2 ###############################################################
+
+gae = VGAE_tfp2()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(200)):
+    with tf.GradientTape() as tape:
+        logits = gae.recon_edge(graph)
+        loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+            pos_weight=pos_weight
+        ))
+
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+plt.show()
+
+embeddings = gae(graph).mode().numpy()
+
+visualzie_embeddding(embeddings, labels)
