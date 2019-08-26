@@ -425,8 +425,8 @@ class MDGAE(tf.keras.Model):
         inputs_tensor = [X, G]
         latent = self.conv1(inputs_tensor)
         self.alphas = tf.nn.softmax(
-            tf.clip_by_value(self.base_temperature, 0, 1.0/self.num_component) + \
-                tf.pow(self.conv2([latent, G]), tf.clip_by_value(self.alpha_temperature, .5, 1.5))
+            tf.clip_by_value(self.base_temperature, 0.1, 1.0/self.num_component) + \
+                tf.pow(self.conv2([latent, G]), 1 + tf.clip_by_value(self.alpha_temperature, .5, 1))
         )
         self.z_log_std = self.conv3([latent, G])
         z_mean_mix = self.conv4([latent, G])
