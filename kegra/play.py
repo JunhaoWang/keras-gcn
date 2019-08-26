@@ -16,6 +16,8 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import time
 from sklearn.metrics.cluster import normalized_mutual_info_score
+import networkx as nx
+from functools import reduce
 
 np.random.seed(0)
 
@@ -28,19 +30,36 @@ NB_EPOCH = 2000
 PATIENCE = 10  # early stopping patience
 BETA_VAE = 100
 VISAUL_FREQ = 20
-NUM_SAMPLE = 10
+NUM_SAMPLE = 5
 
 # Get data
-X, A, y = load_data(dataset=DATASET)
-y_train, y_val, y_test, idx_train, idx_val, idx_test, train_mask = get_splits(y)
+# ############################################## CORA ##################################################
+# X, A, y = load_data(dataset=DATASET)
+# labels = np.argmax(y, 1)
+
+############################################## SBM ##################################################
+
+## diff 3
+sizes = [200, 200, 200, 200]
+self_probs = [0.1, 0.3, 0.5, 0.7]
+
+scale_factor = .1
+probs = np.diag(self_probs)
+probs = np.array(self_probs).reshape(-1, 1) * scale_factor + probs
+g = nx.stochastic_block_model(sizes, probs, directed = True, seed=0)
+
+X = np.eye(np.sum(sizes))
+A = nx.to_scipy_sparse_matrix(g, dtype=np.float32)
+labels = np.array(
+    reduce(lambda  x,y: x+y, [[ind] * i for ind, i in enumerate(sizes)])
+)
+
+#############################################################################################
 
 pos_weight = float(A.shape[0] * A.shape[0] - A.sum()) / A.sum()
 norm = A.shape[0] * A.shape[0] / float((A.shape[0] * A.shape[0] - A.sum()) * 2)
-labels = np.argmax(y, 1)
-num_nodes = len(y)
+num_nodes = A.shape[0]
 
-# Normalize X
-X /= X.sum(1).reshape(-1, 1)
 
 if FILTER == 'localpool':
     """ Local pooling filters (see 'renormalization trick' in Kipf & Welling, arXiv 2016) """
