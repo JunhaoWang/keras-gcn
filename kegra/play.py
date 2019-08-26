@@ -41,7 +41,7 @@ NUM_SAMPLE = 5
 
 ## diff 3
 sizes = [200, 200, 200, 200]
-self_probs = [0.1, 0.3, 0.5, 0.7]
+self_probs = [0.01, 0.03, 0.05, 0.07]
 
 scale_factor = .1
 probs = np.diag(self_probs)
@@ -94,10 +94,6 @@ def recon_edge_helper(latent, method='dot'):
         result = tf.reshape(tf.matmul(latent, tf.transpose(latent)), [-1])
     return result
 
-def _softplus_inverse(x):
-  """Helper which computes the function inverse of `tf.nn.softplus`."""
-  return tf.math.log(tf.math.expm1(x))
-
 def make_gaussian_mixture_prior(latent_size, mixture_components):
   """Creates the mixture of Gaussians prior distribution.
   Args:
@@ -120,12 +116,51 @@ def make_gaussian_mixture_prior(latent_size, mixture_components):
   mixture_logits = tf.compat.v1.get_variable(
       name="mixture_logits", shape=[mixture_components])
 
+  components = tfp.distributions.MultivariateNormalDiag(
+      loc=loc,
+      scale_diag=tf.nn.softplus(raw_scale_diag))
+
   return tfp.distributions.MixtureSameFamily(
-      components_distribution=tfp.distributions.MultivariateNormalDiag(
-          loc=loc,
-          scale_diag=tf.nn.softplus(raw_scale_diag)),
-      mixture_distribution=tfp.distributions.Categorical(logits=mixture_logits),
-      name="prior")
+      components_distribution=components,
+      mixture_distribution=tfd.Categorical(logits=mixture_logits))
+
+
+def make_gaussian_mixture_prior_lowrank(latent_size, mixture_components, perturb_rank):
+  """Creates the mixture of Gaussians prior distribution.
+  Args:
+    latent_size: The dimensionality of the latent representation.
+    mixture_components: Number of elements of the mixture.
+  Returns:
+    random_prior: A `tfd.Distribution` instance representing the distribution
+      over encodings in the absence of any evidence.
+  """
+  if mixture_components == 1:
+    # See the module docstring for why we don't learn the parameters here.
+    return tfd.MultivariateNormalDiag(
+        loc=tf.zeros([latent_size]),
+        scale_identity_multiplier=1.0)
+
+  loc = tf.compat.v1.get_variable(
+      name="loc", shape=[mixture_components, latent_size])
+  raw_scale_diag = tf.compat.v1.get_variable(
+      name="raw_scale_diag", shape=[mixture_components, latent_size])
+  mixture_logits = tf.compat.v1.get_variable(
+      name="mixture_logits", shape=[mixture_components])
+  perturb_U = tf.compat.v1.get_variable(
+      name="perturb_U", shape=[mixture_components, latent_size, perturb_rank])
+  perturb_m = tf.compat.v1.get_variable(
+      name="perturb_m", shape=[mixture_components, perturb_rank])
+
+  components = tfp.distributions.MultivariateNormalDiagPlusLowRank(
+      loc=loc,
+      scale_diag=tf.nn.softplus(raw_scale_diag),
+      scale_perturb_factor=perturb_U,
+      scale_perturb_diag=perturb_m
+  )
+
+  return tfp.distributions.MixtureSameFamily(
+      components_distribution=components,
+      mixture_distribution=tfd.Categorical(logits=mixture_logits))
 
 class dpmeans:
 
@@ -328,7 +363,7 @@ def visualzie_embeddding(embeddings, labels, name):
     inferred_labels, obj, em_time = dp.fit(embeddings)
     # nmi = dp.compute_nmi(inferred_labels, labels)
     print('dirichlet process cluster NMI: {}'.format(normalized_mutual_info_score(labels, inferred_labels)))
-    visualize_embedding_helper(X_embedded, inferred_labels, 'inferred_' + name)
+    visualize_embedding_helper(X_embedded, inferred_labels, 'dirichlet_inferred_' + name)
 
 class GAE(tf.keras.Model):
     def __init__(self):
@@ -480,9 +515,7 @@ class MDGAE(tf.keras.Model):
         #     tf.clip_by_value(self.base_temperature, 0.1, 1.0/self.num_component) + \
         #         tf.pow(self.conv2([latent, G]), 1 + tf.clip_by_value(self.alpha_temperature, .5, 1))
         # )
-        self.alphas = tf.nn.softmax(
-            self.conv2([latent, G])
-        )
+        self.alphas = self.conv2([latent, G])
         self.z_log_std = self.conv3([latent, G])
         z_mean_mix = self.conv4([latent, G])
         batch_size = z_mean_mix.shape.as_list()[0]
@@ -525,9 +558,53 @@ class MDGAE_tfp1(tf.keras.Model):
         return tfd.MultivariateNormalDiag(
             loc=latent[..., :self.latent_dim],
             scale_diag=tf.nn.softplus(latent[..., self.latent_dim:] +
-                                      _softplus_inverse(1.0)))
+                                      tfd.softplus_inverse(1.0)))
 
+    def recon_edge(self, inputs):
+        """Run the model."""
+        latent_sample = self.call(inputs)
+        return recon_edge_helper(latent_sample)
 
+class MDGAE_tfp2(tf.keras.Model):
+    def __init__(self, latent_dim = 7, num_component = 7, perturb_rank = 2):
+        super(MDGAE_tfp2, self).__init__()
+        self.num_component = num_component
+        self.latent_dim = latent_dim
+        self.perturb_rank = perturb_rank
+        self.conv1 = GraphConvolution(
+            self.latent_dim * 2, 1 , activation='relu', kernel_regularizer=l2(5e-4)
+        )
+        self.conv2 = GraphConvolution(
+            self.latent_dim * 2, 1, activation='relu'
+        )
+        self.dense1 = tf.keras.layers.Dense(2 * self.latent_dim, activation='tanh')
+        self.dense2 = tf.keras.layers.Dense((self.latent_dim + 1)* self.perturb_rank, activation='tanh')
+        self.prior = make_gaussian_mixture_prior_lowrank(self.latent_dim, self.num_component, self.perturb_rank)
+
+    def call(self, inputs):
+        X = tf.cast(tf.convert_to_tensor(inputs[0]), tf.float32)
+        G = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[1]), tf.float32)
+        batch_size = X.shape.as_list()[0]
+        inputs_tensor = [X, G]
+        latent = self.conv1(inputs_tensor)
+        latent = self.conv2([latent, G])
+        param_dist = self.dense1(latent)
+        param_perturb = self.dense2(latent)
+        perturn_U = param_perturb[..., :self.latent_dim * self.perturb_rank]
+        perturn_U_reshape = tf.reshape(perturn_U, [batch_size, self.latent_dim, self.perturb_rank])
+        perturb_m = param_perturb[..., self.latent_dim * self.perturb_rank:]
+        return tfd.MultivariateNormalDiagPlusLowRank(
+            loc=param_dist[..., :self.latent_dim],
+            scale_diag=tf.nn.softplus(param_dist[..., self.latent_dim:] +
+                                      tfd.softplus_inverse(1.0)),
+            scale_perturb_factor=perturn_U_reshape,
+            scale_perturb_diag=perturb_m
+        )
+
+    def recon_edge(self, inputs):
+        """Run the model."""
+        latent_sample = self.call(inputs)
+        return recon_edge_helper(latent_sample)
 
 # ############################################# GAE ###############################################################
 #
@@ -743,9 +820,50 @@ class MDGAE_tfp1(tf.keras.Model):
 #
 # visualzie_embeddding(embeddings, labels, 'mdgae_cluster.png')
 
-############################################ MDGAE_tfp1 ###############################################################
+# ############################################ MDGAE_tfp1 ###############################################################
+#
+# gae = MDGAE_tfp1()
+#
+# optimizer = tf.train.AdamOptimizer()
+#
+# loss_history = []
+#
+# for epoch in tqdm(range(NB_EPOCH)):
+#     with tf.GradientTape() as tape:
+#         approx_posterior = gae(graph)
+#         logits = recon_edge_helper(approx_posterior)
+#         loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+#             pos_weight=pos_weight
+#         ))
+#
+#         approx_posterior_sample = approx_posterior.sample(NUM_SAMPLE)
+#         loss_kl = (0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(
+#             approx_posterior.log_prob(approx_posterior_sample) - gae.prior.log_prob(approx_posterior_sample)
+#         )
+#         loss_value = loss_recon + loss_kl
+#
+#     if epoch % VISAUL_FREQ == 1:
+#         visualzie_embeddding(approx_posterior, labels, 'streaming_mdgae_tfp1.png')
+#     loss_history.append(loss_value.numpy())
+#     grads = tape.gradient(loss_value, gae.trainable_variables)
+#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+#                             global_step=tf.train.get_or_create_global_step())
+#
+# plt.plot(loss_history)
+# plt.xlabel('Batch #')
+# plt.ylabel('Loss [entropy]')
+# plt.savefig('mdgae_tfp1_loss.png')
+# plt.clf()
+# plt.close()
+# embeddings = gae(graph)
+#
+# visualzie_embeddding(embeddings, labels, 'mdgae_tfp1_cluster.png')
 
-gae = MDGAE_tfp1()
+############################################ MDGAE_tfp2 ###############################################################
+
+gae = MDGAE_tfp2()
 
 optimizer = tf.train.AdamOptimizer()
 
@@ -768,7 +886,7 @@ for epoch in tqdm(range(NB_EPOCH)):
         loss_value = loss_recon + loss_kl
 
     if epoch % VISAUL_FREQ == 1:
-        visualzie_embeddding(approx_posterior, labels, 'streaming_mdgae_tfp1.png')
+        visualzie_embeddding(approx_posterior, labels, 'streaming_mdgae_tfp2.png')
     loss_history.append(loss_value.numpy())
     grads = tape.gradient(loss_value, gae.trainable_variables)
     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
@@ -777,9 +895,9 @@ for epoch in tqdm(range(NB_EPOCH)):
 plt.plot(loss_history)
 plt.xlabel('Batch #')
 plt.ylabel('Loss [entropy]')
-plt.savefig('mdgae_tfp1_loss.png')
+plt.savefig('mdgae_tfp2_loss.png')
 plt.clf()
 plt.close()
 embeddings = gae(graph)
 
-visualzie_embeddding(embeddings, labels, 'mdgae_tfp1_cluster.png')
+visualzie_embeddding(embeddings, labels, 'mdgae_tfp2_cluster.png')
