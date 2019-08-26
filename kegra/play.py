@@ -18,6 +18,7 @@ import time
 from sklearn.metrics.cluster import normalized_mutual_info_score
 import networkx as nx
 from functools import reduce
+import scipy.sparse as sp
 
 np.random.seed(0)
 
@@ -26,33 +27,43 @@ DATASET = 'cora'
 FILTER = 'localpool'  # 'chebyshev'
 MAX_DEGREE = 2  # maximum polynomial degree
 SYM_NORM = True  # symmetric (True) vs. left-only (False) normalization
-NB_EPOCH = 2000
+NB_EPOCH = 4000
 PATIENCE = 10  # early stopping patience
-BETA_VAE = 100
-VISAUL_FREQ = 20
+BETA_VAE = 1
+VISAUL_FREQ = 100
 NUM_SAMPLE = 5
 
 # Get data
+# ############################################## COMMUNITY ##################################################
+path_to_dataset = 'data_comm/medicine.npz'
+# Load the data
+G = load_dataset_comm(path_to_dataset)
+A, X, F = G['A'], G['X'], G['F']
+labels = np.argmax(F.toarray(), 1)
+# X = X.toarray()[:500,:5]
+# A = sp.csr_matrix(A[:500,:][:,:500].toarray())
+# labels = labels[:500]
+
 # ############################################## CORA ##################################################
 # X, A, y = load_data(dataset=DATASET)
 # labels = np.argmax(y, 1)
 
-############################################## SBM ##################################################
-
-## diff 3
-sizes = [200, 200, 200, 200]
-self_probs = [0.01, 0.03, 0.05, 0.07]
-
-scale_factor = .1
-probs = np.diag(self_probs)
-probs = np.array(self_probs).reshape(-1, 1) * scale_factor + probs
-g = nx.stochastic_block_model(sizes, probs, directed = True, seed=0)
-
-X = np.eye(np.sum(sizes))
-A = nx.to_scipy_sparse_matrix(g, dtype=np.float32)
-labels = np.array(
-    reduce(lambda  x,y: x+y, [[ind] * i for ind, i in enumerate(sizes)])
-)
+# ############################################## SBM ##################################################
+#
+# ## diff 3
+# sizes = [200, 200, 200, 200]
+# self_probs = [0.01, 0.03, 0.05, 0.07]
+#
+# scale_factor = .1
+# probs = np.diag(self_probs)
+# probs = np.array(self_probs).reshape(-1, 1) * scale_factor + probs
+# g = nx.stochastic_block_model(sizes, probs, directed = True, seed=0)
+#
+# X = np.eye(np.sum(sizes))
+# A = nx.to_scipy_sparse_matrix(g, dtype=np.float32)
+# labels = np.array(
+#     reduce(lambda  x,y: x+y, [[ind] * i for ind, i in enumerate(sizes)])
+# )
 
 #############################################################################################
 
@@ -376,7 +387,7 @@ class GAE(tf.keras.Model):
         )
 
     def call(self, inputs):
-        X = tf.cast(tf.convert_to_tensor(inputs[0]), tf.float32)
+        X = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[0]), tf.float32)
         G = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[1]), tf.float32)
         inputs_tensor = [X, G]
         result = self.conv1(inputs_tensor)
@@ -606,42 +617,45 @@ class MDGAE_tfp2(tf.keras.Model):
         latent_sample = self.call(inputs)
         return recon_edge_helper(latent_sample)
 
-# ############################################# GAE ###############################################################
-#
-# gae = GAE()
-#
-# optimizer = tf.train.AdamOptimizer()
-#
-# loss_history = []
-#
-# for epoch in tqdm(range(NB_EPOCH)):
-#     with tf.GradientTape() as tape:
-#         latent_sample = gae(graph)
-#         logits = recon_edge_helper(latent_sample)
-#         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-#             pos_weight=pos_weight
-#         ))
-#     if epoch % VISAUL_FREQ == 1:
-#         visualzie_embeddding(latent_sample, labels, 'streaming_gae.png')
-#
-#     loss_history.append(loss_value.numpy())
-#     grads = tape.gradient(loss_value, gae.trainable_variables)
-#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
-#                             global_step=tf.train.get_or_create_global_step())
-#
-# plt.plot(loss_history)
-# plt.xlabel('Batch #')
-# plt.ylabel('Loss [entropy]')
-# # plt.show()
-# plt.savefig('gae_loss.png')
-# plt.clf()
-# plt.close()
-# embeddings = gae(graph)
-#
-# visualzie_embeddding(embeddings, labels, 'gae_cluster.png')
-#
+############################################# GAE ###############################################################
+
+gae = GAE()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(NB_EPOCH)):
+    with tf.GradientTape() as tape:
+        latent_sample = gae(graph)
+        # logits = recon_edge_helper(latent_sample)
+        # loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+        #     labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+        #     logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+        #     pos_weight=pos_weight
+        # ))
+        reconstr_loss_stochastic = berpo_loss(latent_sample, A, stochastic=True, batch_size=10000)
+        reg_loss = tf.losses.get_regularization_loss()
+        loss_value = reconstr_loss_stochastic + reg_loss
+    if epoch % VISAUL_FREQ == 1:
+        visualzie_embeddding(latent_sample, labels, 'streaming_gae.png')
+
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+# plt.show()
+plt.savefig('gae_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
+
+visualzie_embeddding(embeddings, labels, 'gae_cluster.png')
+
 # ############################################# VGAE ###############################################################
 #
 # gae = VGAE()
@@ -764,11 +778,11 @@ class MDGAE_tfp2(tf.keras.Model):
 #         latent_sample = gae(graph)
 #         logits = recon_edge_helper(latent_sample)
 #
-        # loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-        #     labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-        #     logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-        #     pos_weight=pos_weight
-        # ))
+#         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+#             pos_weight=pos_weight
+#         ))
 #
 #         # loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
 #         #     labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
@@ -819,7 +833,7 @@ class MDGAE_tfp2(tf.keras.Model):
 # embeddings = gae(graph)
 #
 # visualzie_embeddding(embeddings, labels, 'mdgae_cluster.png')
-
+#
 # ############################################ MDGAE_tfp1 ###############################################################
 #
 # gae = MDGAE_tfp1()
@@ -860,44 +874,44 @@ class MDGAE_tfp2(tf.keras.Model):
 # embeddings = gae(graph)
 #
 # visualzie_embeddding(embeddings, labels, 'mdgae_tfp1_cluster.png')
-
-############################################ MDGAE_tfp2 ###############################################################
-
-gae = MDGAE_tfp2()
-
-optimizer = tf.train.AdamOptimizer()
-
-loss_history = []
-
-for epoch in tqdm(range(NB_EPOCH)):
-    with tf.GradientTape() as tape:
-        approx_posterior = gae(graph)
-        logits = recon_edge_helper(approx_posterior)
-        loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-            pos_weight=pos_weight
-        ))
-
-        approx_posterior_sample = approx_posterior.sample(NUM_SAMPLE)
-        loss_kl = (0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(
-            approx_posterior.log_prob(approx_posterior_sample) - gae.prior.log_prob(approx_posterior_sample)
-        )
-        loss_value = loss_recon + loss_kl
-
-    if epoch % VISAUL_FREQ == 1:
-        visualzie_embeddding(approx_posterior, labels, 'streaming_mdgae_tfp2.png')
-    loss_history.append(loss_value.numpy())
-    grads = tape.gradient(loss_value, gae.trainable_variables)
-    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
-                            global_step=tf.train.get_or_create_global_step())
-
-plt.plot(loss_history)
-plt.xlabel('Batch #')
-plt.ylabel('Loss [entropy]')
-plt.savefig('mdgae_tfp2_loss.png')
-plt.clf()
-plt.close()
-embeddings = gae(graph)
-
-visualzie_embeddding(embeddings, labels, 'mdgae_tfp2_cluster.png')
+#
+# ########################################### MDGAE_tfp2 ###############################################################
+#
+# gae = MDGAE_tfp2()
+#
+# optimizer = tf.train.AdamOptimizer()
+#
+# loss_history = []
+#
+# for epoch in tqdm(range(NB_EPOCH)):
+#     with tf.GradientTape() as tape:
+#         approx_posterior = gae(graph)
+#         logits = recon_edge_helper(approx_posterior)
+#         loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+#             pos_weight=pos_weight
+#         ))
+#
+#         approx_posterior_sample = approx_posterior.sample(NUM_SAMPLE)
+#         loss_kl = (0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(
+#             approx_posterior.log_prob(approx_posterior_sample) - gae.prior.log_prob(approx_posterior_sample)
+#         )
+#         loss_value = loss_recon + loss_kl
+#
+#     if epoch % VISAUL_FREQ == 1:
+#         visualzie_embeddding(approx_posterior, labels, 'streaming_mdgae_tfp2.png')
+#     loss_history.append(loss_value.numpy())
+#     grads = tape.gradient(loss_value, gae.trainable_variables)
+#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+#                             global_step=tf.train.get_or_create_global_step())
+#
+# plt.plot(loss_history)
+# plt.xlabel('Batch #')
+# plt.ylabel('Loss [entropy]')
+# plt.savefig('mdgae_tfp2_loss.png')
+# plt.clf()
+# plt.close()
+# embeddings = gae(graph)
+#
+# visualzie_embeddding(embeddings, labels, 'mdgae_tfp2_cluster.png')

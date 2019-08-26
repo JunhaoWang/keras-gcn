@@ -4,6 +4,7 @@ from keras import activations, initializers, constraints
 from keras import regularizers
 from keras.engine import Layer
 import keras.backend as K
+import tensorflow as tf
 
 
 class GraphConvolution(Layer):
@@ -63,19 +64,31 @@ class GraphConvolution(Layer):
             self.bias = None
         self.built = True
 
-    def call(self, inputs, mask=None):
-        features = inputs[0]
-        basis = inputs[1:]
+    # def call(self, inputs, mask=None):
+    #     features = inputs[0]
+    #     basis = inputs[1:]
+    #
+    #     supports = list()
+    #     for i in range(self.support):
+    #         supports.append(K.dot(basis[i], features))
+    #     supports = K.concatenate(supports, axis=1)
+    #     output = K.dot(supports, self.kernel)
+    #
+    #     if self.bias is not None:
+    #         output += self.bias
+    #     return self.activation(output)
 
-        supports = list()
-        for i in range(self.support):
-            supports.append(K.dot(basis[i], features))
-        supports = K.concatenate(supports, axis=1)
-        output = K.dot(supports, self.kernel)
+    def call(self, inputs, mask=None):
+        X = inputs[0]
+        A_norm = inputs[1]
+        if isinstance(X, tf.SparseTensor):
+            H = tf.sparse_tensor_dense_matmul(A_norm, tf.sparse_tensor_dense_matmul(X, self.kernel))
+        else:
+            H = tf.matmul(tf.sparse_tensor_dense_matmul(A_norm, X), self.kernel)
 
         if self.bias is not None:
-            output += self.bias
-        return self.activation(output)
+            H += self.bias
+        return self.activation(H)
 
     def get_config(self):
         config = {'units': self.units,
