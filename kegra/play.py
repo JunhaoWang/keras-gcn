@@ -24,9 +24,10 @@ DATASET = 'cora'
 FILTER = 'localpool'  # 'chebyshev'
 MAX_DEGREE = 2  # maximum polynomial degree
 SYM_NORM = True  # symmetric (True) vs. left-only (False) normalization
-NB_EPOCH = 1000
+NB_EPOCH = 2000
 PATIENCE = 10  # early stopping patience
 BETA_VAE = 100
+VISAUL_FREQ = 20
 
 # Get data
 X, A, y = load_data(dataset=DATASET)
@@ -76,6 +77,35 @@ def recon_edge_helper(latent, method='dot'):
 def _softplus_inverse(x):
   """Helper which computes the function inverse of `tf.nn.softplus`."""
   return tf.math.log(tf.math.expm1(x))
+
+def make_gaussian_mixture_prior(latent_size, mixture_components):
+  """Creates the mixture of Gaussians prior distribution.
+  Args:
+    latent_size: The dimensionality of the latent representation.
+    mixture_components: Number of elements of the mixture.
+  Returns:
+    random_prior: A `tfd.Distribution` instance representing the distribution
+      over encodings in the absence of any evidence.
+  """
+  if mixture_components == 1:
+    # See the module docstring for why we don't learn the parameters here.
+    return tfd.MultivariateNormalDiag(
+        loc=tf.zeros([latent_size]),
+        scale_identity_multiplier=1.0)
+
+  loc = tf.compat.v1.get_variable(
+      name="loc", shape=[mixture_components, latent_size])
+  raw_scale_diag = tf.compat.v1.get_variable(
+      name="raw_scale_diag", shape=[mixture_components, latent_size])
+  mixture_logits = tf.compat.v1.get_variable(
+      name="mixture_logits", shape=[mixture_components])
+
+  return tfp.distributions.MixtureSameFamily(
+      components_distribution=tfp.distributions.MultivariateNormalDiag(
+          loc=loc,
+          scale_diag=tf.nn.softplus(raw_scale_diag)),
+      mixture_distribution=tfp.distributions.Categorical(logits=mixture_logits),
+      name="prior")
 
 class dpmeans:
 
@@ -278,7 +308,7 @@ def visualzie_embeddding(embeddings, labels, name):
     inferred_labels, obj, em_time = dp.fit(embeddings)
     # nmi = dp.compute_nmi(inferred_labels, labels)
     print('dirichlet process cluster NMI: {}'.format(normalized_mutual_info_score(labels, inferred_labels)))
-    visualize_embedding_helper(X_embedded, inferred_labels, 'inferred_'+name)
+    visualize_embedding_helper(X_embedded, inferred_labels, 'inferred_' + name)
 
 class GAE(tf.keras.Model):
     def __init__(self):
@@ -398,6 +428,8 @@ class VGAE_tfp2(tf.keras.Model):
 
 
 class MDGAE(tf.keras.Model):
+    # Todo: try temperature (work kinda), tf contrib loss (trying);
+    #  sampling instead of marginalizing (not working), kian's loss (not yet)
     def __init__(self, latent_dim = 7, num_component = 7):
         super(MDGAE, self).__init__()
         self.num_component = num_component
@@ -414,10 +446,10 @@ class MDGAE(tf.keras.Model):
         self.conv4 = GraphConvolution(
             self.latent_dim * self.num_component, 1
         )
-        self.alpha_temperature = tf.get_variable("alpha_temperature", [1],
-                                dtype=tf.float32,initializer=tf.zeros_initializer)
-        self.base_temperature = tf.get_variable("base_temperature", [1],
-                                dtype=tf.float32,initializer=tf.zeros_initializer)
+        # self.alpha_temperature = tf.get_variable("alpha_temperature", [1],
+        #                         dtype=tf.float32,initializer=tf.zeros_initializer)
+        # self.base_temperature = tf.get_variable("base_temperature", [1],
+        #                         dtype=tf.float32,initializer=tf.zeros_initializer)
 
     def call(self, inputs):
         X = tf.cast(tf.convert_to_tensor(inputs[0]), tf.float32)
@@ -448,140 +480,190 @@ class MDGAE(tf.keras.Model):
         latent_sample = self.call(inputs)
         return recon_edge_helper(latent_sample)
 
-# ############################################# GAE ###############################################################
-#
-# gae = GAE()
-#
-# optimizer = tf.train.AdamOptimizer()
-#
-# loss_history = []
-#
-# for epoch in tqdm(range(NB_EPOCH)):
-#     with tf.GradientTape() as tape:
-#         logits = gae.recon_edge(graph)
-#         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-#             pos_weight=pos_weight
-#         ))
-#
-#     loss_history.append(loss_value.numpy())
-#     grads = tape.gradient(loss_value, gae.trainable_variables)
-#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
-#                             global_step=tf.train.get_or_create_global_step())
-#
-# plt.plot(loss_history)
-# plt.xlabel('Batch #')
-# plt.ylabel('Loss [entropy]')
-# # plt.show()
-# plt.savefig('gae_loss.png')
-# plt.clf()
-# plt.close()
-# embeddings = gae(graph)
-#
-# visualzie_embeddding(embeddings, labels, 'gae_cluster.png')
-#
-# ############################################# VGAE ###############################################################
-#
-# gae = VGAE()
-#
-# optimizer = tf.train.AdamOptimizer()
-#
-# loss_history = []
-#
-# for epoch in tqdm(range(NB_EPOCH)):
-#     with tf.GradientTape() as tape:
-#         logits = gae.recon_edge(graph)
-#         loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-#             pos_weight=pos_weight
-#         ))
-#         loss_kl = -(0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(tf.reduce_sum(1 + 2 * gae.z_log_std - tf.square(gae.z_mean) -
-#                                                                    tf.square(tf.exp(gae.z_log_std)), 1))
-#         loss_value = loss_recon + loss_kl
-#     loss_history.append(loss_value.numpy())
-#     grads = tape.gradient(loss_value, gae.trainable_variables)
-#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
-#                             global_step=tf.train.get_or_create_global_step())
-#
-# plt.plot(loss_history)
-# plt.xlabel('Batch #')
-# plt.ylabel('Loss [entropy]')
-# plt.savefig('vgae_loss.png')
-# plt.clf()
-# plt.close()
-# embeddings = gae(graph)
-#
-# visualzie_embeddding(embeddings, labels, 'vgae_cluster.png')
-#
-# ############################################ VGAE_tfp1 ###############################################################
-#
-# gae = VGAE_tfp1()
-#
-# optimizer = tf.train.AdamOptimizer()
-#
-# loss_history = []
-#
-# for epoch in tqdm(range(NB_EPOCH)):
-#     with tf.GradientTape() as tape:
-#         logits = gae.recon_edge(graph)
-#         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-#             pos_weight=pos_weight
-#         ))
-#
-#     loss_history.append(loss_value.numpy())
-#     grads = tape.gradient(loss_value, gae.trainable_variables)
-#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
-#                             global_step=tf.train.get_or_create_global_step())
-#
-# plt.plot(loss_history)
-# plt.xlabel('Batch #')
-# plt.ylabel('Loss [entropy]')
-# plt.savefig('vgae_tfp1_loss.png')
-# plt.clf()
-# plt.close()
-# embeddings = gae(graph)
-#
-# visualzie_embeddding(embeddings, labels, 'vgae_tfp1_cluster.png')
-#
-#
-# ############################################ VGAE_tfp2 ###############################################################
-#
-# gae = VGAE_tfp2()
-#
-# optimizer = tf.train.AdamOptimizer()
-#
-# loss_history = []
-#
-# for epoch in tqdm(range(NB_EPOCH)):
-#     with tf.GradientTape() as tape:
-#         logits = gae.recon_edge(graph)
-#         loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
-#             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
-#             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
-#             pos_weight=pos_weight
-#         ))
-#         loss_kl = -(0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(tf.reduce_sum(1 + 2 * gae.z_log_std - tf.square(gae.z_mean) -
-#                                                                     tf.square(tf.exp(gae.z_log_std)), 1))
-#         loss_value = loss_recon + loss_kl
-#
-#     loss_history.append(loss_value.numpy())
-#     grads = tape.gradient(loss_value, gae.trainable_variables)
-#     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
-#                             global_step=tf.train.get_or_create_global_step())
-#
-# plt.plot(loss_history)
-# plt.xlabel('Batch #')
-# plt.ylabel('Loss [entropy]')
-# plt.savefig('vgae_tfp2_loss.png')
-# plt.clf()
-# plt.close()
-# embeddings = gae(graph)
-#
-# visualzie_embeddding(embeddings, labels, 'vgae_tfp2_cluster.png')
+
+class MDGAE_tfp1(tf.keras.Model):
+    def __init__(self, latent_dim = 7, num_component = 7):
+        super(MDGAE_tfp1, self).__init__()
+        self.num_component = num_component
+        self.latent_dim = latent_dim
+        self.conv1 = GraphConvolution(
+            self.latent_dim * 2, 1 , activation='relu', kernel_regularizer=l2(5e-4)
+        )
+
+
+    def call(self, inputs):
+        X = tf.cast(tf.convert_to_tensor(inputs[0]), tf.float32)
+        G = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[1]), tf.float32)
+        inputs_tensor = [X, G]
+        latent = self.conv1(inputs_tensor)
+        # self.alphas = tf.nn.softmax(
+        #     tf.clip_by_value(self.base_temperature, 0.1, 1.0/self.num_component) + \
+        #         tf.pow(self.conv2([latent, G]), 1 + tf.clip_by_value(self.alpha_temperature, .5, 1))
+        # )
+        self.alphas = tf.nn.softmax(
+            self.conv2([latent, G])
+        )
+        self.z_log_std = self.conv3([latent, G])
+        z_mean_mix = self.conv4([latent, G])
+        batch_size = z_mean_mix.shape.as_list()[0]
+        self.z_mean_mix_reshape = tf.reshape(z_mean_mix, [batch_size, self.num_component, self.latent_dim])
+        z_std = tf.exp(self.z_log_std)
+        z_std_reshape = tf.stack([z_std] * self.num_component, axis=-1)
+        z_sample_all = self.z_mean_mix_reshape + tf.random_normal(self.z_mean_mix_reshape.shape.as_list()) * z_std_reshape
+        z_sample_marginalized = tf.matmul(z_sample_all, tf.expand_dims(
+            self.alphas, -1
+        ))
+        return tf.squeeze(z_sample_marginalized)
+
+    def recon_edge(self, inputs):
+        """Run the model."""
+        latent_sample = self.call(inputs)
+        return recon_edge_helper(latent_sample)
+
+############################################# GAE ###############################################################
+
+gae = GAE()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(NB_EPOCH)):
+    with tf.GradientTape() as tape:
+        latent_sample = gae(graph)
+        logits = recon_edge_helper(latent_sample)
+        loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+            pos_weight=pos_weight
+        ))
+    if epoch % VISAUL_FREQ == 1:
+        visualzie_embeddding(latent_sample, labels, 'streaming_gae.png')
+
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+# plt.show()
+plt.savefig('gae_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
+
+visualzie_embeddding(embeddings, labels, 'gae_cluster.png')
+
+############################################# VGAE ###############################################################
+
+gae = VGAE()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(NB_EPOCH)):
+    with tf.GradientTape() as tape:
+        latent_sample = gae(graph)
+        logits = recon_edge_helper(latent_sample)
+        loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+            pos_weight=pos_weight
+        ))
+        loss_kl = -(0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(tf.reduce_sum(1 + 2 * gae.z_log_std - tf.square(gae.z_mean) -
+                                                                   tf.square(tf.exp(gae.z_log_std)), 1))
+        loss_value = loss_recon + loss_kl
+    if epoch % VISAUL_FREQ == 1:
+        visualzie_embeddding(latent_sample, labels, 'streaming_vgae.png')
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+plt.savefig('vgae_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
+
+visualzie_embeddding(embeddings, labels, 'vgae_cluster.png')
+
+############################################ VGAE_tfp1 ###############################################################
+
+gae = VGAE_tfp1()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(NB_EPOCH)):
+    with tf.GradientTape() as tape:
+        latent_sample = gae(graph)
+        logits = recon_edge_helper(latent_sample)
+        loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+            pos_weight=pos_weight
+        ))
+    if epoch % VISAUL_FREQ == 1:
+        visualzie_embeddding(latent_sample, labels, 'streaming_vgae_tfp1.png')
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+plt.savefig('vgae_tfp1_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
+
+visualzie_embeddding(embeddings, labels, 'vgae_tfp1_cluster.png')
+
+
+############################################ VGAE_tfp2 ###############################################################
+
+gae = VGAE_tfp2()
+
+optimizer = tf.train.AdamOptimizer()
+
+loss_history = []
+
+for epoch in tqdm(range(NB_EPOCH)):
+    with tf.GradientTape() as tape:
+        latent_sample = gae(graph)
+        logits = recon_edge_helper(latent_sample)
+        loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+            labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+            logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+            pos_weight=pos_weight
+        ))
+        loss_kl = -(0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(tf.reduce_sum(1 + 2 * gae.z_log_std - tf.square(gae.z_mean) -
+                                                                    tf.square(tf.exp(gae.z_log_std)), 1))
+        loss_value = loss_recon + loss_kl
+    if epoch % VISAUL_FREQ == 1:
+        visualzie_embeddding(latent_sample, labels, 'streaming_vgae_tfp2.png')
+    loss_history.append(loss_value.numpy())
+    grads = tape.gradient(loss_value, gae.trainable_variables)
+    optimizer.apply_gradients(zip(grads, gae.trainable_variables),
+                            global_step=tf.train.get_or_create_global_step())
+
+plt.plot(loss_history)
+plt.xlabel('Batch #')
+plt.ylabel('Loss [entropy]')
+plt.savefig('vgae_tfp2_loss.png')
+plt.clf()
+plt.close()
+embeddings = gae(graph)
+
+visualzie_embeddding(embeddings, labels, 'vgae_tfp2_cluster.png')
 
 ############################################ MDGAE ###############################################################
 
@@ -593,21 +675,50 @@ loss_history = []
 
 for epoch in tqdm(range(NB_EPOCH)):
     with tf.GradientTape() as tape:
-        logits = gae.recon_edge(graph)
+        latent_sample = gae(graph)
+        logits = recon_edge_helper(latent_sample)
+
         loss_value = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
             labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
             logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
             pos_weight=pos_weight
         ))
-        # loss_kl = -(0.5 / num_nodes) * BETA_VAE * tf.reduce_mean(tf.reduce_sum(1 + 2 * gae.z_log_std - tf.square(gae.z_mean) -
-        #                                                             tf.square(tf.exp(gae.z_log_std)), 1))
-        # loss_value = loss_recon + loss_kl
+
+        # loss_recon = norm * tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(
+        #     labels=tf.cast(tf.convert_to_tensor(np.asarray(A.toarray()).reshape(-1)), tf.float32),
+        #     logits=tf.cast(tf.convert_to_tensor(logits), tf.float32),
+        #     pos_weight=pos_weight
+        # ))
+        #
+        # num_sample = np.min((200, num_nodes))
+        # rand_idx_cluster_loss = np.random.choice(list(range(num_nodes)), num_sample, replace=False)
+        #
+        # cur_inferred_labels = tf.argmax(gae.alphas, axis=1)
+        # cur_inferred_labels_sample = tf.gather(cur_inferred_labels, rand_idx_cluster_loss)
+        # latent_sample_sample = tf.gather(latent_sample, rand_idx_cluster_loss)
+
+        # loss_cluster = tf.contrib.losses.metric_learning.triplet_semihard_loss(
+        #     cur_inferred_labels_sample,
+        #     latent_sample_sample,
+        #     margin=3.0
+        # )
+
+        # loss_value = loss_recon + epoch/100000 * loss_cluster
+        #
+        # if epoch % VISAUL_FREQ == 1:
+        #     X_embedded = PCA().fit_transform(latent_sample.numpy())
+        #     visualize_embedding_helper(X_embedded, cur_inferred_labels.numpy(), 'streaming_mdgae_latent_inferrred_cluster.png')
+        #     print(normalized_mutual_info_score(labels, cur_inferred_labels.numpy()))
+
+        if epoch % VISAUL_FREQ == 1:
+            visualzie_embeddding(latent_sample, labels, 'streaming_mdgae.png')
 
     loss_history.append(loss_value.numpy())
     grads = tape.gradient(loss_value, gae.trainable_variables)
     optimizer.apply_gradients(zip(grads, gae.trainable_variables),
                             global_step=tf.train.get_or_create_global_step())
-embeddings = gae(graph).numpy()
+
+embeddings = np.nan_to_num(gae(graph).numpy())
 latent_inferred_labels = np.argmax(gae.alphas.numpy(), 1)
 X_embedded = PCA().fit_transform(embeddings)
 visualize_embedding_helper(X_embedded, latent_inferred_labels, 'mdgae_latent_inferrred_cluster.png')
