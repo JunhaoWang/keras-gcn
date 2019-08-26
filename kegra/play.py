@@ -424,9 +424,12 @@ class MDGAE(tf.keras.Model):
         G = tf.cast(convert_sparse_matrix_to_sparse_tensor(inputs[1]), tf.float32)
         inputs_tensor = [X, G]
         latent = self.conv1(inputs_tensor)
+        # self.alphas = tf.nn.softmax(
+        #     tf.clip_by_value(self.base_temperature, 0.1, 1.0/self.num_component) + \
+        #         tf.pow(self.conv2([latent, G]), 1 + tf.clip_by_value(self.alpha_temperature, .5, 1))
+        # )
         self.alphas = tf.nn.softmax(
-            tf.clip_by_value(self.base_temperature, 0.1, 1.0/self.num_component) + \
-                tf.pow(self.conv2([latent, G]), 1 + tf.clip_by_value(self.alpha_temperature, .5, 1))
+            self.conv2([latent, G])
         )
         self.z_log_std = self.conv3([latent, G])
         z_mean_mix = self.conv4([latent, G])
@@ -435,7 +438,9 @@ class MDGAE(tf.keras.Model):
         z_std = tf.exp(self.z_log_std)
         z_std_reshape = tf.stack([z_std] * self.num_component, axis=-1)
         z_sample_all = self.z_mean_mix_reshape + tf.random_normal(self.z_mean_mix_reshape.shape.as_list()) * z_std_reshape
-        z_sample_marginalized = tf.matmul(z_sample_all, tf.expand_dims(self.alphas, -1))
+        z_sample_marginalized = tf.matmul(z_sample_all, tf.expand_dims(
+            self.alphas, -1
+        ))
         return tf.squeeze(z_sample_marginalized)
 
     def recon_edge(self, inputs):
